@@ -1,16 +1,7 @@
-import os
-import glob
 import time
-from datetime import datetime
-
-import torch
-import numpy as np
-
 import gymnasium as gym
-import gymnasium_robotics
-
 from PPO import PPO
-
+import os
 
 #################################### Testing ###################################
 def test():
@@ -18,31 +9,21 @@ def test():
 
     ################## hyperparameters ##################
 
-    # env_name = "CartPole-v1"
-    # has_continuous_action_space = False
-    # max_ep_len = 400
-    # action_std = None
-
-    # env_name = "LunarLander-v2"
-    # has_continuous_action_space = False
-    # max_ep_len = 300
-    # action_std = None
-
-    # env_name = "BipedalWalker-v2"
+    # env_name = "FrankaKitchen-v1"
+    # tasks = ['microwave']
     # has_continuous_action_space = True
-    # max_ep_len = 1500           # max timesteps in one episode
+    # max_ep_len = 1000           # max timesteps in one episode
     # action_std = 0.1            # set same std for action distribution which was used while saving
 
-    env_name = "FrankaKitchen-v1"
-    tasks = ['microwave']
-    has_continuous_action_space = True
-    max_ep_len = 1000           # max timesteps in one episode
-    action_std = 0.1            # set same std for action distribution which was used while saving
+    env_name = "MountainCar-v0"
+    has_continuous_action_space = False  # continuous action space; else discrete
+    max_ep_len = 1000                   # max timesteps in one episode
+    action_std = None                    # not used in discrete action space
 
     render = True              # render environment on screen
     frame_delay = 0             # if required; add delay between frames
 
-    total_test_episodes = 10    # total num of testing episodes
+    total_test_episodes = 3    # total num of testing episodes
 
     K_epochs = 80               # update policy for K epochs
     eps_clip = 0.2              # clip parameter for PPO
@@ -52,8 +33,7 @@ def test():
     lr_critic = 0.001           # learning rate for critic
 
     #####################################################
-    gym.register_envs(gymnasium_robotics)
-    env = gym.make(env_name, tasks_to_complete=tasks)
+    env = gym.make(env_name, render_mode="human")
 
     # state space dimension
     state_dim = env.observation_space.shape[0]
@@ -69,11 +49,11 @@ def test():
 
     # preTrained weights directory
 
-    random_seed = 0             #### set this to load a particular checkpoint trained on random seed
+    random_seed = 42             #### set this to load a particular checkpoint trained on random seed
     run_num_pretrained = 0      #### set this to load a particular checkpoint num
 
-    directory = "PPO_preTrained" + '/' + env_name + '/'
-    checkpoint_path = directory + "PPO_{}_{}_{}.pth".format(env_name, random_seed, run_num_pretrained)
+    directory = os.path.join("..", "PPO_preTrained", env_name)
+    checkpoint_path = os.path.join(directory, "{}_{}_{}.pth".format(env_name, random_seed, run_num_pretrained))
     print("loading network from : " + checkpoint_path)
 
     ppo_agent.load(checkpoint_path)
@@ -84,11 +64,13 @@ def test():
 
     for ep in range(1, total_test_episodes+1):
         ep_reward = 0
-        state = env.reset()
+        state, info = env.reset()
 
         for t in range(1, max_ep_len+1):
             action = ppo_agent.select_action(state)
-            state, reward, done, _ = env.step(action)
+            state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+
             ep_reward += reward
 
             if render:
