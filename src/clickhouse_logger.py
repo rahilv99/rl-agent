@@ -46,7 +46,7 @@ class ClickHouseLogger:
     def __init__(self):
         self.table_name = 'training_logs'
 
-        self.batch_size = 10
+        self.batch_size = 100
         self.batch_buffer = []
 
         self.client = get_client(

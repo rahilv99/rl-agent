@@ -32,8 +32,8 @@ random_seed = 42         # set random seed if required (0 = no random seed)
 #####################################################
 
 ################### Modal configuration ###################
-run_num_pretrained = 0      #### change this to prevent overwriting weights in same env_name folder
-checkpoint_dir = 'PPO_preTrained'
+run_num_pretrained = 1      #### change this to prevent overwriting weights in same env_name folder
+volumne_name = 'PPO_preTrained'
 volume_mount_path = "/root/models"
 #####################################################
 
@@ -42,7 +42,7 @@ image = modal.Image.debian_slim(python_version="3.10").pip_install(
                                                             "numpy",
                                                             "gymnasium",
                                                             "clickhouse-connect",
-                                                            "langfuse"
+                                                            # "langfuse"
                                                         ).add_local_dir(
                                                             os.getcwd(), 
                                                             "/root/workspace", 
@@ -53,7 +53,7 @@ app = modal.App("ppo-training",
                 image=image
                 )
 
-volume = modal.Volume.from_name(checkpoint_dir, create_if_missing=True)
+volume = modal.Volume.from_name(volumne_name, create_if_missing=True)
 
 @app.function(
     gpu=None,
@@ -70,7 +70,7 @@ def train():
     import numpy as np
     from datetime import datetime
 
-    from langfuse import get_client, propagate_attributes
+    # from langfuse import get_client, propagate_attributes
 
     from workspace.PPO import PPO
     from workspace.clickhouse_logger import ClickHouseLogger
@@ -123,13 +123,9 @@ def train():
         action_dim = env.action_space.n
 
     # Setup checkpointing - save to volume for persistence
-    
-    checkpoint_dir_path = os.path.join(volume_mount_path, checkpoint_dir, env_name)
-    os.makedirs(checkpoint_dir_path, exist_ok=True)
-    checkpoint_path = os.path.join(
-        checkpoint_dir_path,
-        f"{env_name}_{random_seed}_{run_num_pretrained}.pth"
-    )
+    checkpoint_dir = os.path.join(volume_mount_path, env_name)
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, f"{env_name}_{random_seed}_{run_num_pretrained}.pth")
 
     # Initialize PPO agent
     ppo_agent = PPO(
@@ -153,7 +149,7 @@ def train():
     logger = ClickHouseLogger()
     run_id = f"{env_name}_{random_seed}_{run_num_pretrained}_{start_time.strftime('%Y%m%d_%H%M%S')}"
 
-    lf = get_client()
+    # lf = get_client()
 
     time_step = 0
     i_episode = 0
@@ -165,104 +161,107 @@ def train():
         state, info = env.reset(seed=reset_seed)
         current_ep_reward = 0
 
-        with lf.start_as_current_observation(as_type="span", name=f'epsiode_{i_episode}', session_id=run_id) as root:
-            root.update_trace(input={"initial_state": state.tolist()})
-            for t in range(1, max_ep_len + 1):
-                # with lf.start_as_current_observation(as_type="span", name=f"step_{t}") as step_span:
-                # Select action with policy
-                action = ppo_agent.select_action(state)
-                state, reward, terminated, truncated, info = env.step(action)
-                done = terminated or truncated
+        # with lf.start_as_current_observation(as_type="span", name=f'epsiode_{i_episode}', session_id=run_id) as root:
+            # root.update_trace(input={"initial_state": state.tolist()})
+        for t in range(1, max_ep_len + 1):
+            # with lf.start_as_current_observation(as_type="span", name=f"step_{t}") as step_span:
+            # Select action with policy
+            action = ppo_agent.select_action(state)
+            state, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
 
-                # Save reward and terminal flags
-                ppo_agent.buffer.rewards.append(reward)
-                ppo_agent.buffer.is_terminals.append(done)
+            # Save reward and terminal flags
+            ppo_agent.buffer.rewards.append(reward)
+            ppo_agent.buffer.is_terminals.append(terminated)
 
-                # step_span.score(name="reward", value=float(reward), data_type="NUMERIC")
-                # step_span.score(name="timestep", value=int(t), data_type="NUMERIC")
-                # step_span.score(name="action", value=float(action), data_type="NUMERIC")
+            # step_span.score(name="reward", value=float(reward), data_type="NUMERIC")
+            # step_span.score(name="timestep", value=int(t), data_type="NUMERIC")
+            # step_span.score(name="action", value=float(action), data_type="NUMERIC")
 
-                # step_span.update(
-                #     input={"state": state.tolist()},
-                #     output={"action": float(action), "reward": float(reward)}
-                # )
+            # step_span.update(
+            #     input={"state": state.tolist()},
+            #     output={"action": float(action), "reward": float(reward)}
+            # )
 
-                time_step += 1
-                current_ep_reward += reward
+            time_step += 1
+            current_ep_reward += reward
 
-                # Update PPO agent
-                if time_step % update_timestep == 0:
-                    ppo_agent.update()
+            # Update PPO agent
+            if time_step % update_timestep == 0:
+                ppo_agent.update()
 
-                # Decay action std if continuous action space
-                if (has_continuous_action_space and
-                    action_std_decay_freq and
-                    time_step % action_std_decay_freq == 0):
-                    ppo_agent.decay_action_std(
-                        action_std_decay_rate,
-                        min_action_std
-                    )
-
-                # Save model weights
-                if time_step % save_model_freq == 0:
-                    print("--------------------------------------------------------------------------------------------")
-                    print(f"saving model at : {checkpoint_path}")
-                    ppo_agent.save(checkpoint_path)
-                    
-                    # Verify file exists before committing
-                    if os.path.exists(checkpoint_path):
-                        file_size = os.path.getsize(checkpoint_path)
-                        print(f"Model file saved successfully. Size: {file_size} bytes")
-                        
-                        # Commit volume to persist the model
-                        try:
-                            volume.commit()
-                            print("Volume committed successfully - model persisted to volume")
-                        except Exception as e:
-                            print(f"Error committing volume: {e}")
-                    else:
-                        print(f"ERROR: Model file not found at {checkpoint_path} after save operation!")
-                    
-                    print("Elapsed Time  : ", datetime.now().replace(microsecond=0) - start_time)
-                    print("--------------------------------------------------------------------------------------------")
-
-                # Break if episode is over
-                if done:
-                    break
-                
-                ##### Logging episode data #####
-
-            # Get current action_std if continuous action space
-            current_action_std = None
-            if has_continuous_action_space:
-                current_action_std = ppo_agent.action_std
-
-            # Log episode to ClickHouse
-            try:
-                logger.log_step(
-                    episode=i_episode,
-                    timestep=time_step,
-                    reward=current_ep_reward,
-                    action_std=current_action_std,
-                    env_name=env_name,
-                    run_id=run_id
+            # Decay action std if continuous action space
+            if (has_continuous_action_space and
+                action_std_decay_freq and
+                time_step % action_std_decay_freq == 0):
+                ppo_agent.decay_action_std(
+                    action_std_decay_rate,
+                    min_action_std
                 )
-            except Exception as e:
-                print("Error logging to ClickHouse. Silently passing: ", e)
-                pass
 
-            root.update_trace(
-                output={"episode_reward": float(current_ep_reward), "episode_length": int(t), "final_state": state.tolist(), "end_reason": "terminated" if terminated else "truncated"}
+            # Save model weights
+            if time_step % save_model_freq == 0:
+                print("--------------------------------------------------------------------------------------------")
+                print(f"saving model at : {checkpoint_path}")
+                ppo_agent.save(checkpoint_path)
+                
+                # Verify file exists before committing
+                if os.path.exists(checkpoint_path):
+                    file_size = os.path.getsize(checkpoint_path)
+                    print(f"Model file saved successfully. Size: {file_size} bytes")
+                    
+                    # Commit volume to persist the model
+                    try:
+                        volume.commit()
+                        print("Volume committed successfully - model persisted to volume")
+                    except Exception as e:
+                        print(f"Error committing volume: {e}")
+                else:
+                    print(f"ERROR: Model file not found at {checkpoint_path} after save operation!")
+                
+                print("Elapsed Time  : ", datetime.now().replace(microsecond=0) - start_time)
+                print("--------------------------------------------------------------------------------------------")
+
+            # Break if episode is over
+            if done:
+                break
+            
+            ##### Logging episode data #####
+
+        # Get current action_std if continuous action space
+        current_action_std = None
+        if has_continuous_action_space:
+            current_action_std = ppo_agent.action_std
+
+        # Log episode to ClickHouse
+        try:
+            logger.log_step(
+                episode=i_episode,
+                timestep=time_step,
+                reward=current_ep_reward,
+                action_std=current_action_std,
+                env_name=env_name,
+                run_id=run_id
             )
+        except Exception as e:
+            print("Error logging to ClickHouse. Silently passing: ", e)
+            pass
+
+        # root.update_trace(
+        #     output={"episode_reward": float(current_ep_reward), "episode_length": int(t), "final_state": state.tolist(), "end_reason": "terminated" if terminated else "truncated"}
+        # )
 
         # Flush Langfuse buffer after each 100 episodes
-        if i_episode % 100:
-            try:
-                lf.flush()
-            except Exception as e:
-                print(f"Warning: Failed to flush Langfuse buffer. Silently passing: {e}")
+        # if i_episode % 100:
+        #     try:
+        #         lf.flush()
+        #     except Exception as e:
+        #         print(f"Warning: Failed to flush Langfuse buffer. Silently passing: {e}")
 
         i_episode += 1
+
+        if i_episode % 100 == 0:
+            print("Episode : {} \t\t Timestep : {} \t\t Reward : {}".format(i_episode, time_step, round(current_ep_reward, 2)))
 
     env.close()
 
@@ -273,11 +272,11 @@ def train():
     except Exception as e:
         print(f"Warning: Failed to close ClickHouse logger: {e}")
 
-    try:
-        lf.flush()
-        lf.shutdown()
-    except Exception as e:
-        print(f"Warning: Failed to shutdown Langfuse client: {e}")
+    # try:
+    #     lf.flush()
+    #     lf.shutdown()
+    # except Exception as e:
+    #     print(f"Warning: Failed to shutdown Langfuse client: {e}")
 
     end_time = datetime.now().replace(microsecond=0)
     print("============================================================================================")
